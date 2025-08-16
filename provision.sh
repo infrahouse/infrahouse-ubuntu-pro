@@ -4,6 +4,23 @@ set -eux
 set -o pipefail
 
 export DEBIAN_FRONTEND=noninteractive
+declare -A fingerprints=(
+  [noble]="A627 B776 0019 0BA5 1B90  3453 D37A 181B 689A D619"
+)
+
+cleanup_logs() {
+    cloud-init clean --logs
+    truncate -s0 /var/log/syslog 2>/dev/null || true
+    truncate -s0 /var/log/cloud-init.log /var/log/cloud-init-output.log 2>/dev/null || true
+    journalctl --rotate 2>/dev/null || true
+    journalctl --vacuum-time=1s 2>/dev/null || true
+}
+
+cleanup_system_ids() {
+    : > /etc/machine-id || true
+    rm -f /var/lib/dbus/machine-id || true
+    rm -f /home/ubuntu/.bash_history || true
+}
 
 apt-get update
 apt-get -y upgrade
@@ -24,9 +41,11 @@ REPO_LIST="/etc/apt/sources.list.d/infrahouse.list"
 
 install -d -m 0755 "${KEYRING_DIR}"
 tmpkey="$(mktemp)"
-curl --fail --silent --show-error --location --retry 5 \
-  "${REPO_URL}DEB-GPG-KEY-release-${UBUNTU_CODENAME}.infrahouse.com" \
-  | gpg --dearmor > "${tmpkey}"
+EXPECTED_FINGERPRINT="${fingerprints[$UBUNTU_CODENAME]}"
+GPG_KEY="$(curl --fail --silent --show-error --location --retry 5 --connect-timeout 10 --max-time 30 \
+  "${REPO_URL}DEB-GPG-KEY-release-${UBUNTU_CODENAME}.infrahouse.com")"
+echo "$GPG_KEY" | gpg --show-keys --fingerprint | grep -q "$EXPECTED_FINGERPRINT" || exit 1
+echo "$GPG_KEY" | gpg --dearmor > "${tmpkey}"
 install -m 0644 "${tmpkey}" "${KEYRING_PATH}"
 rm -f "${tmpkey}"
 
@@ -56,18 +75,12 @@ do
   gem install "$g"
 done
 
-pro auto-attach || true
-pro enable esm-infra esm-apps || true
+pro auto-attach
+pro enable esm-infra esm-apps
 
 apt-get -y autoremove --purge
 apt-get clean
 rm -rf /var/lib/apt/lists/*
 
-cloud-init clean --logs
-: > /etc/machine-id || true
-rm -f /var/lib/dbus/machine-id || true
-rm -f /home/ubuntu/.bash_history || true
-truncate -s0 /var/log/syslog 2>/dev/null || true
-truncate -s0 /var/log/cloud-init.log /var/log/cloud-init-output.log 2>/dev/null || true
-journalctl --rotate 2>/dev/null || true
-journalctl --vacuum-time=1s 2>/dev/null || true
+cleanup_logs
+cleanup_system_ids
