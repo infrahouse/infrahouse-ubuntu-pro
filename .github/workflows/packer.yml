@@ -42,6 +42,15 @@ jobs:
       - name: Packer build
         run: |
           PARAMS=$(aws ssm get-parameter --name /infrahouse/ubuntu-pro/args)
+          ssh_private_key_file="$(mktemp)"
+          echo $PARAMS | jq.ssh_private_key > "$ssh_private_key_file"
           packer build \
+            -var "region=$(echo $PARAMS | jq.region)" \
+            -var "ssh_keypair_name=$(echo $PARAMS | jq.ssh_keypair_name)" \
+            -var "ssh_keypair_name=$(echo $PARAMS | jq.ssh_keypair_name)" \
+            -var "security_group_id=$(echo $PARAMS | jq.security_group_id)" \
+            -var "subnet_id=$(echo $PARAMS | jq.subnet_id)" \
+            -var "ssh_private_key_file=$ssh_private_key_file" \
             -var "ubuntu_codename=${{ env.UBUNTU_CODENAME }}" \
             .
+          rm -f "$ssh_private_key_file"
