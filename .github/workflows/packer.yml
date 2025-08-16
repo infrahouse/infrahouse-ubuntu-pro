@@ -1,0 +1,54 @@
+---
+name: 'Packer AMI build'
+
+on:  # yamllint disable-line rule:truthy
+  schedule:
+    - cron: "0 */6 * * *"   # runs at :00 every 6 hours (UTC)
+  workflow_dispatch:        # allow manual runs too
+
+concurrency:
+  group: schedule-6h
+  cancel-in-progress: false
+
+permissions:
+  id-token: write  # This is required for requesting the JWT
+  contents: read
+  pull-requests: write
+
+env:
+  AWS_REGION: "us-west-1"
+  ROLE_ARN: "arn:aws:iam::303467602807:role/ih-tf-infrahouse-ubuntu-pro-github"
+jobs:
+  build:
+    name: 'Build AMI'
+    runs-on: ["self-hosted", "Linux", "noble"]
+
+    defaults:
+      run:
+        shell: bash
+
+    strategy:
+      matrix:
+        ubuntu_codename: ["noble"]
+
+    env:
+      UBUNTU_CODENAME: ${{ matrix.ubuntu_codename }}
+
+    steps:
+      # Checkout the repository to the GitHub Actions runner
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_ARN}}
+          role-session-name: packer-build
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Packer init
+        run: packer init .
+
+      - name: Packer build
+        run: |
+          python packer-build.py
