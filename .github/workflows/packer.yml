@@ -24,7 +24,7 @@ jobs:
 
     strategy:
       matrix:
-        ubuntu_codename: ["noble", "oracular"]
+        ubuntu_codename: ["noble", "jammy"]
 
     env:
       UBUNTU_CODENAME: ${{ matrix.ubuntu_codename }}
@@ -46,15 +46,4 @@ jobs:
 
       - name: Packer build
         run: |
-          PARAMS=$(aws ssm get-parameter --name /infrahouse/ubuntu-pro/args --with-decryption | jq -r .Parameter.Value)
-          ssh_private_key_file="$(mktemp)"
-          echo $PARAMS | jq -r .ssh_private_key > "$ssh_private_key_file"
-          packer build \
-            -var "region=$(echo $PARAMS | jq -r .region)" \
-            -var "ssh_keypair_name=$(echo $PARAMS | jq -r .ssh_keypair_name)" \
-            -var "security_group_id=$(echo $PARAMS | jq -r .security_group_id)" \
-            -var "subnet_id=$(echo $PARAMS | jq -r .subnet_id)" \
-            -var "ssh_private_key_file=$ssh_private_key_file" \
-            -var "ubuntu_codename=${{ env.UBUNTU_CODENAME }}" \
-            .
-          rm -f "$ssh_private_key_file"
+          python packer-build.py
