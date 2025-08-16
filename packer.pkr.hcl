@@ -10,7 +10,7 @@ packer {
 }
 
 variable "region" {
-  type    = string
+  type = string
 }
 
 variable "instance_type" {
@@ -19,7 +19,7 @@ variable "instance_type" {
 }
 
 variable "ubuntu_codename" {
-  type    = string
+  type = string
 }
 
 variable "ssh_keypair_name" {
@@ -82,9 +82,10 @@ source "amazon-ebs" "ubuntu_pro" {
   snapshot_users = var.ami_users
 
   tags = {
-    Name       = "infrahouse-ubuntu-pro-${var.ubuntu_codename}-{{timestamp}}"
-    base       = "Ubuntu Pro ${var.ubuntu_codename}"
-    maintainer = "InfraHouse"
+    Name            = "infrahouse-ubuntu-pro-${var.ubuntu_codename}-{{timestamp}}"
+    base            = "Ubuntu Pro ${var.ubuntu_codename}"
+    maintainer      = "infrahouse"
+    ubuntu_codename = var.ubuntu_codename
   }
   run_tags = {
     created_by = "infrahouse-ubuntu-pro"
