@@ -86,6 +86,9 @@ source "amazon-ebs" "ubuntu_pro" {
     base       = "Ubuntu Pro ${var.ubuntu_codename}"
     maintainer = "InfraHouse"
   }
+  run_tags = {
+    created_by = "infrahouse-ubuntu-pro"
+  }
 }
 
 build {
