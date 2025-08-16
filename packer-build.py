@@ -4,6 +4,7 @@ import os
 import stat
 import subprocess
 import tempfile
+
 import boto3
 
 def build(codename):
@@ -49,7 +50,7 @@ def get_last_base(codename):
     resp = ssm.get_parameter(
         Name=f"/infrahouse/ubuntu-pro/latest/{codename}",
     )
-    return json.loads(resp["Parameter"]["Value"])
+    return resp["Parameter"]["Value"]
 
 
 def set_last_base(codename, ami_id):
@@ -66,7 +67,7 @@ def get_latest_ubuntu_ami(codename, product="pro-server"):
     resp = ssm.get_parameter(
         Name=f"/aws/service/canonical/ubuntu/{product}/{codename}/stable/current/amd64/hvm/ebs-gp3/ami-id",
     )
-    return json.loads(resp["Parameter"]["Value"])
+    return resp["Parameter"]["Value"]
 
 
 def main():
