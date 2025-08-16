@@ -34,7 +34,7 @@ echo "deb [signed-by=${KEYRING_PATH}] ${REPO_URL} ${UBUNTU_CODENAME} main" \
   | tee "${REPO_LIST}" >/dev/null
 
 apt-get update
-apt-get -y install --no-install-r-ecommends \
+apt-get -y install --no-install-recommends \
   infrahouse-toolkit \
   awscli
 
