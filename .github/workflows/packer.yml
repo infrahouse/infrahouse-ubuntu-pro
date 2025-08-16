@@ -24,7 +24,7 @@ jobs:
 
     strategy:
       matrix:
-        ubuntu_codename: ["noble", "jammy"]
+        ubuntu_codename: ["noble"]
 
     env:
       UBUNTU_CODENAME: ${{ matrix.ubuntu_codename }}
