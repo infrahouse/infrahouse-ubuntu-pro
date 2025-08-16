@@ -2,8 +2,13 @@
 name: 'Packer AMI build'
 
 on:  # yamllint disable-line rule:truthy
-  pull_request:
+  schedule:
+    - cron: "0 */6 * * *"   # runs at :00 every 6 hours (UTC)
+  workflow_dispatch:        # allow manual runs too
 
+concurrency:
+  group: schedule-6h
+  cancel-in-progress: false
 
 permissions:
   id-token: write  # This is required for requesting the JWT
