@@ -35,8 +35,25 @@ echo "deb [signed-by=${KEYRING_PATH}] ${REPO_URL} ${UBUNTU_CODENAME} main" \
 
 apt-get update
 apt-get -y install --no-install-recommends \
+  awscli \
   infrahouse-toolkit \
-  awscli
+  jq \
+  gcc \
+  make \
+  net-tools \
+  python3 \
+  python-is-python3 \
+  python3-virtualenv \
+  python3-pip \
+  ruby-dev \
+  ruby-rubygems \
+  sysstat
+
+export PATH=/opt/puppetlabs/puppet/bin:$PATH
+for g in json aws-sdk-core aws-sdk-secretsmanager
+do
+  gem install "$g"
+done
 
 pro auto-attach || true
 pro enable esm-infra esm-apps || true
