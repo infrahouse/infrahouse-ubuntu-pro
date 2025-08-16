@@ -36,6 +36,7 @@ echo "deb [signed-by=${KEYRING_PATH}] ${REPO_URL} ${UBUNTU_CODENAME} main" \
 apt-get update
 apt-get -y install --no-install-recommends \
   awscli \
+  build-essential \
   infrahouse-toolkit \
   jq \
   gcc \
