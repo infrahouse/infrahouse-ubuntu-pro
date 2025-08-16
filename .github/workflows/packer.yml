@@ -43,7 +43,7 @@ jobs:
         run: |
           PARAMS=$(aws ssm get-parameter --name /infrahouse/ubuntu-pro/args)
           ssh_private_key_file="$(mktemp)"
-          echo $PARAMS | jq.ssh_private_key > "$ssh_private_key_file"
+          echo $PARAMS | jq .ssh_private_key > "$ssh_private_key_file"
           packer build \
             -var "region=$(echo $PARAMS | jq.region)" \
             -var "ssh_keypair_name=$(echo $PARAMS | jq .ssh_keypair_name)" \
