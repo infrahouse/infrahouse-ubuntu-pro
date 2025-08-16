@@ -75,8 +75,8 @@ do
   gem install "$g"
 done
 
-pro auto-attach
-pro enable esm-infra esm-apps
+pro auto-attach || true
+pro enable esm-infra esm-apps || true
 
 apt-get -y autoremove --purge
 apt-get clean
