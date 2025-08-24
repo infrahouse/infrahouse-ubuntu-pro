@@ -33,6 +33,8 @@ def build(codename):
             "-var", f"subnet_id={params['subnet_id']}",
             "-var", f"ssh_private_key_file={key_path}",
             "-var", f"ubuntu_codename={codename}",
+            "-var", 'ami_groups=["all"]',
+            "-var", 'ami_users=["all"]',
             ".",
         ]
 
