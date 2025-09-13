@@ -36,7 +36,7 @@ KEYRING_DIR="/etc/apt/keyrings"
 KEYRING_PATH="${KEYRING_DIR}/infrahouse.gpg"
 REPO_HOST="release-${UBUNTU_CODENAME}.infrahouse.com"
 REPO_URL="https://${REPO_HOST}/"
-REPO_LIST="/etc/apt/sources.list.d/infrahouse.list"
+REPO_LIST="/etc/apt/sources.list.d/50-infrahouse.list"
 
 
 install -d -m 0755 "${KEYRING_DIR}"
