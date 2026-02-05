@@ -73,8 +73,9 @@ def get_latest_ubuntu_ami(codename, product="pro-server"):
 
 def main():
     ubuntu_codename = os.environ.get("UBUNTU_CODENAME")
+    force_rebuild = os.environ.get("FORCE_REBUILD", "false").lower() == "true"
     latest_ubuntu_ami = get_latest_ubuntu_ami(ubuntu_codename)
-    if get_last_base(ubuntu_codename) != latest_ubuntu_ami:
+    if force_rebuild or get_last_base(ubuntu_codename) != latest_ubuntu_ami:
         build(ubuntu_codename)
         set_last_base(ubuntu_codename, latest_ubuntu_ami)
 

@@ -4,7 +4,12 @@ name: 'Packer AMI build'
 on:  # yamllint disable-line rule:truthy
   schedule:
     - cron: "0 */6 * * *"   # runs at :00 every 6 hours (UTC)
-  workflow_dispatch:        # allow manual runs too
+  workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: 'Force rebuild even if base AMI unchanged'
+        type: boolean
+        default: false
 
 concurrency:
   group: schedule-6h
@@ -33,6 +38,7 @@ jobs:
 
     env:
       UBUNTU_CODENAME: ${{ matrix.ubuntu_codename }}
+      FORCE_REBUILD: ${{ github.event.inputs.force_rebuild || 'false' }}
 
     steps:
       # Checkout the repository to the GitHub Actions runner
