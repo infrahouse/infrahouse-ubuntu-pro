@@ -16,6 +16,7 @@ def build(codename):
         WithDecryption=True,
     )
     params = json.loads(resp["Parameter"]["Value"])
+    ami_regions = params.get("ami_regions", [])
 
     # 2) Write SSH private key to a secure temp file
     key_fd, key_path = tempfile.mkstemp(prefix="packer_key_", suffix=".pem")
@@ -34,13 +35,18 @@ def build(codename):
             "-var", f"ssh_private_key_file={key_path}",
             "-var", f"ubuntu_codename={codename}",
             "-var", 'ami_groups=["all"]',
-            ".",
         ]
+        if ami_regions:
+            cmd += ["-var", f"ami_regions={json.dumps(ami_regions)}"]
+        cmd.append(".")
 
         # 4) Run packer (inherits your current env/AWS creds)
         subprocess.run(cmd, check=True)
+
+        # 5) Store per-region AMI IDs in SSM
+        store_regional_ami_ids(codename, params["region"], ami_regions)
     finally:
-        # 5) Clean up the private key file
+        # 6) Clean up the private key file
         try:
             os.remove(key_path)
         except FileNotFoundError:
@@ -60,8 +66,40 @@ def set_last_base(codename, ami_id):
         Name=f"/infrahouse/ubuntu-pro/latest/{codename}",
         Value=ami_id,
         Type="String",
-        Overwrite=True
+        Overwrite=True,
     )
+
+
+def store_regional_ami_ids(codename, build_region, ami_regions):
+    """Read the Packer manifest and store each region's AMI ID in that region's SSM."""
+    manifest_path = "manifest.json"
+    if not os.path.exists(manifest_path):
+        return
+
+    with open(manifest_path) as f:
+        manifest = json.load(f)
+
+    last_build = manifest["builds"][-1]
+    artifact_id = last_build["artifact_id"]
+
+    # artifact_id format: "us-west-1:ami-abc123,us-east-1:ami-def456,..."
+    region_ami_map = {}
+    for pair in artifact_id.split(","):
+        region, ami_id = pair.split(":")
+        region_ami_map[region] = ami_id
+
+    # Write AMI ID to SSM in each region (build region + copy regions)
+    all_regions = [build_region] + [r for r in ami_regions if r != build_region]
+    for region in all_regions:
+        ami_id = region_ami_map.get(region)
+        if ami_id:
+            ssm = boto3.client("ssm", region_name=region)
+            ssm.put_parameter(
+                Name=f"/infrahouse/ubuntu-pro/latest/{codename}",
+                Value=ami_id,
+                Type="String",
+                Overwrite=True,
+            )
 
 def get_latest_ubuntu_ami(codename, product="pro-server"):
     ssm = boto3.client("ssm")

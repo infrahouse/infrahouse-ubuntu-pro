@@ -45,10 +45,14 @@ variable "ami_groups" {
   default = []
 }
 variable "ami_users" {
-  type = list(string)
+  type    = list(string)
   default = []
 }
-// AWS account IDs
+
+variable "ami_regions" {
+  type    = list(string)
+  default = []
+}
 
 source "amazon-ebs" "ubuntu_pro" {
   region           = var.region
@@ -80,6 +84,7 @@ source "amazon-ebs" "ubuntu_pro" {
   ami_groups     = var.ami_groups
   ami_users      = var.ami_users
   snapshot_users = var.ami_users
+  ami_regions    = var.ami_regions
 
   tags = {
     Name            = "infrahouse-ubuntu-pro-${var.ubuntu_codename}-{{timestamp}}"
@@ -102,5 +107,10 @@ build {
     script          = "provision.sh"
     pause_before    = "30s"
     max_retries     = 3
+  }
+
+  post-processor "manifest" {
+    output     = "manifest.json"
+    strip_path = true
   }
 }
