@@ -61,6 +61,7 @@ apt-get -y install --no-install-recommends \
   gcc \
   make \
   net-tools \
+  nfs-common \
   python3 \
   python-is-python3 \
   python3-virtualenv \
