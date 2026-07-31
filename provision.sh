@@ -4,6 +4,13 @@ set -eux
 set -o pipefail
 
 export DEBIAN_FRONTEND=noninteractive
+# needrestart's apt hook defaults to restarting services automatically, and during
+# apt-get upgrade it bounces ssh.service -- packer's own transport -- along with
+# systemd-networkd, systemd-resolved and a systemd daemon-reexec. Restarting anything
+# mid-build buys nothing, since the snapshot is taken afterwards and every instance
+# launched from the AMI boots the new binaries anyway. Keep the report, skip the
+# restarts.
+export NEEDRESTART_MODE=l
 
 configure_apt_lock_timeout() {
     # Puppet's Package provider, cloud-init and the AWS agents (guardduty,
