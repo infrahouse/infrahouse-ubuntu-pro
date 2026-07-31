@@ -8,6 +8,14 @@ declare -A fingerprints=(
   [noble]="A627 B776 0019 0BA5 1B90  3453 D37A 181B 689A D619"
 )
 
+configure_apt_lock_timeout() {
+    # Puppet's Package provider, cloud-init and the AWS agents (guardduty,
+    # inspector) all shell out to apt-get without options, so a global drop-in
+    # is the only place that makes them wait for the dpkg lock instead of
+    # failing outright when something else holds it.
+    echo 'DPkg::Lock::Timeout "300";' > /etc/apt/apt.conf.d/99-lock-timeout
+}
+
 cleanup_logs() {
     cloud-init clean --logs
     truncate -s0 /var/log/syslog 2>/dev/null || true
@@ -21,6 +29,21 @@ cleanup_system_ids() {
     rm -f /var/lib/dbus/machine-id || true
     rm -f /home/ubuntu/.bash_history || true
 }
+
+cleanup_timer_stamps() {
+    # Persistent=true timers record their last trigger here. If these survive
+    # into the snapshot, every launched instance sees a last-trigger of AMI
+    # build time and systemd fires a catch-up run shortly after boot -- for
+    # apt-daily-upgrade that means an unattended-upgrade holding the dpkg lock
+    # during provisioning. Stock Ubuntu ships this directory empty and systemd
+    # recreates it on first boot, so there is nothing to restore.
+    # Timers are stopped first so none of them can re-stamp in the window
+    # between this script exiting and packer powering the instance off.
+    systemctl stop '*.timer' 2>/dev/null || true
+    rm -rf /var/lib/systemd/timers/ || true
+}
+
+configure_apt_lock_timeout
 
 apt-get update
 apt-get -y upgrade
@@ -85,3 +108,4 @@ rm -rf /var/lib/apt/lists/*
 
 cleanup_logs
 cleanup_system_ids
+cleanup_timer_stamps
