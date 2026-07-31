@@ -26,7 +26,11 @@ env:
 jobs:
   build:
     name: 'Build AMI'
-    runs-on: ["self-hosted", "Linux", "noble"]
+    # Packer builds into the VPC in 303467602807 and reaches the source instance
+    # over SSH, so the job has to land on a runner in that account. Without the
+    # environment label the org's production runners in 493370826424 match too,
+    # and the build dies waiting for SSH before any provisioner runs.
+    runs-on: ["self-hosted", "Linux", "noble", "environment:development"]
 
     defaults:
       run:
