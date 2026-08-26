@@ -150,7 +150,12 @@ cleanup_timer_stamps() {
 configure_apt_lock_timeout
 
 with_retry apt-get update
-with_retry apt-get -y upgrade
+# --with-new-pkgs, not plain upgrade: `apt-get upgrade` never installs new
+# packages, so a kernel metapackage bump that crosses a series (6.17.x -> 7.0.x)
+# needs a brand-new linux-image-<version>-aws binary and gets kept back, along
+# with linux-aws and linux-headers-aws. Unlike dist-upgrade this still never
+# removes anything. verify_kernel_current below asserts the result.
+with_retry apt-get -y --with-new-pkgs upgrade
 with_retry apt-get -y install --no-install-recommends \
   gpg \
   lsb-release \
