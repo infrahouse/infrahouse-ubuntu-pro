@@ -83,32 +83,51 @@ verify_kernel_current() {
     echo "kernel check: ${metapackage} ${installed} matches the archive candidate"
 }
 
+pro_attached() {
+    pro status --format json 2>/dev/null | jq -e '.attached == true' >/dev/null
+}
+
+pro_service_enabled() {
+    pro status --format json 2>/dev/null \
+        | jq -e --arg s "$1" 'any(.services[]; .name == $s and .status == "enabled")' >/dev/null
+}
+
 enable_ubuntu_pro() {
-    # Enable, then verify the resulting state rather than trusting exit codes.
-    # `pro auto-attach` errors on an already-attached machine and `pro enable`
-    # errors on an already-enabled service -- both are the state we want, so
-    # their exit codes cannot distinguish success from failure. Only the status
-    # output can.
+    # Act only where the state is wrong, so every command that runs is expected
+    # to succeed and none of them needs `|| true`.
     #
-    # This is fatal on purpose. An AMI that silently shipped without ESM would
-    # look healthy for weeks and then surface as a pile of vulnerabilities in
-    # packages nobody realised had stopped receiving fixes.
+    # The guard is the whole point. `pro auto-attach` exits non-zero on an
+    # already-attached machine and `pro enable` exits non-zero on an
+    # already-enabled service -- and on a Pro marketplace image both are the
+    # normal case, not an edge case, because ubuntu-advantage.service attaches at
+    # boot. Calling them unconditionally is what forced the old `|| true`, and
+    # that in turn meant a genuine failure would have shipped an AMI with ESM
+    # off: healthy-looking for weeks, then a pile of vulnerabilities in packages
+    # that had quietly stopped receiving fixes.
+    #
+    # Reads `pro status --format json` (.attached, .services[].name/.status)
+    # rather than the human table, which is not a stable interface. jq is
+    # installed further up, before this runs.
     local -a required=(esm-infra esm-apps)
     local service missing=""
 
-    pro auto-attach || true
-    pro enable "${required[@]}" || true
+    pro_attached || pro auto-attach
 
     for service in "${required[@]}"; do
-        if ! pro status --all 2>/dev/null \
-            | awk -v s="${service}" '$1 == s && $3 == "enabled" { f = 1 } END { exit !f }'; then
-            missing="${missing} ${service}"
-        fi
+        pro_service_enabled "${service}" || pro enable "${service}"
+    done
+
+    # Re-read rather than trusting the commands above: this is the assertion that
+    # the AMI is actually entitled to the fixes it will be expected to receive.
+    for service in "${required[@]}"; do
+        pro_service_enabled "${service}" || missing="${missing} ${service}"
     done
 
     if [ -n "${missing}" ]; then
         echo "FATAL: Ubuntu Pro service(s) not enabled:${missing}" >&2
         echo "This AMI would ship without ESM and quietly stop receiving those fixes." >&2
+        # Diagnostic on a path that is already failing; do not let it mask the
+        # real error.
         pro status --all >&2 || true
         return 1
     fi
