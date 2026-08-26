@@ -106,7 +106,11 @@ build {
     execute_command = "chmod +x {{ .Path }}; {{ .Vars }} sudo -E {{ .Path }}"
     script          = "provision.sh"
     pause_before    = "30s"
-    max_retries     = 3
+    // No max_retries on purpose. A provisioner-level retry re-runs provision.sh
+    // from the top -- minutes of work to recover from one flaky mirror, with no
+    // indication of which step was flaky, and it requires every step to be
+    // idempotent (`pro enable` is not). provision.sh retries the individual
+    // network calls instead; see with_retry there.
   }
 
   post-processor "manifest" {
