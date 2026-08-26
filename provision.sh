@@ -27,6 +27,39 @@ cleanup_system_ids() {
     rm -f /home/ubuntu/.bash_history || true
 }
 
+verify_kernel_current() {
+    # The image must not ship a kernel older than the archive offers.
+    #
+    # Guards a specific trap: `apt-get upgrade` never installs *new* packages. A
+    # kernel metapackage bump that crosses a series (6.17.x -> 7.0.x) needs a
+    # brand-new linux-image-<version>-aws binary, so apt silently keeps it back
+    # and the build still succeeds. The AMI then ships a stale kernel, every
+    # instance installs the newer one at boot via unattended-upgrade, and none of
+    # them ever runs it -- instances here are replaced, not rebooted. Nothing
+    # about that is visible without this check: `uname -r` on a fresh instance
+    # disagrees with `dpkg -l`, and /var/run/reboot-required is not written.
+    #
+    # Deliberately compares against the candidate rather than asserting a
+    # specific apt flag, so it also catches a pinned kernel, a held package, a
+    # stale mirror, or any future cause.
+    #
+    # Must run while /var/lib/apt/lists is still populated -- apt-cache needs it.
+    local metapackage installed candidate
+    metapackage="linux-image-aws"
+    installed=$(dpkg-query -W -f='${Version}' "${metapackage}")
+    candidate=$(apt-cache policy "${metapackage}" | awk '/Candidate:/ {print $2}')
+
+    if [ "${installed}" != "${candidate}" ]; then
+        echo "FATAL: ${metapackage} is ${installed}, archive offers ${candidate}." >&2
+        echo "The upgrade step did not take it, so this AMI would ship a stale kernel." >&2
+        echo "A series change needs --with-new-pkgs (or dist-upgrade); plain" >&2
+        echo "'apt-get upgrade' keeps it back. apt says:" >&2
+        apt-get -s upgrade 2>/dev/null | sed -n '/kept back/,+2p' >&2 || true
+        return 1
+    fi
+    echo "kernel check: ${metapackage} ${installed} matches the archive candidate"
+}
+
 cleanup_timer_stamps() {
     # Persistent=true timers record their last trigger here. If these survive
     # into the snapshot, every launched instance sees a last-trigger of AMI
@@ -96,6 +129,8 @@ done
 
 pro auto-attach || true
 pro enable esm-infra esm-apps || true
+
+verify_kernel_current
 
 apt-get -y autoremove --purge
 apt-get clean
