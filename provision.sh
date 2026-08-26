@@ -5,6 +5,29 @@ set -o pipefail
 
 export DEBIAN_FRONTEND=noninteractive
 
+with_retry() {
+    # Retry the failing command, not the whole provisioner.
+    #
+    # packer's provisioner-level max_retries re-runs this script from the top,
+    # which is minutes of work to recover from one flaky mirror, hides which step
+    # was actually flaky, and silently demands that every step be idempotent.
+    # `pro enable` is not: on the second pass it reports "already enabled" and
+    # exits non-zero, so a coarse retry turns a healthy state into an error.
+    #
+    # curl already does this for itself further down (--retry 5).
+    local attempt=1 max=5 delay
+    until "$@"; do
+        if [ "${attempt}" -ge "${max}" ]; then
+            echo "FATAL: '$*' failed after ${max} attempts" >&2
+            return 1
+        fi
+        delay=$(( attempt * 10 ))
+        echo "retry ${attempt}/${max} in ${delay}s: $*" >&2
+        sleep "${delay}"
+        attempt=$(( attempt + 1 ))
+    done
+}
+
 configure_apt_lock_timeout() {
     # Puppet's Package provider, cloud-init and the AWS agents (guardduty,
     # inspector) all shell out to apt-get without options, so a global drop-in
@@ -60,6 +83,38 @@ verify_kernel_current() {
     echo "kernel check: ${metapackage} ${installed} matches the archive candidate"
 }
 
+enable_ubuntu_pro() {
+    # Enable, then verify the resulting state rather than trusting exit codes.
+    # `pro auto-attach` errors on an already-attached machine and `pro enable`
+    # errors on an already-enabled service -- both are the state we want, so
+    # their exit codes cannot distinguish success from failure. Only the status
+    # output can.
+    #
+    # This is fatal on purpose. An AMI that silently shipped without ESM would
+    # look healthy for weeks and then surface as a pile of vulnerabilities in
+    # packages nobody realised had stopped receiving fixes.
+    local -a required=(esm-infra esm-apps)
+    local service missing=""
+
+    pro auto-attach || true
+    pro enable "${required[@]}" || true
+
+    for service in "${required[@]}"; do
+        if ! pro status --all 2>/dev/null \
+            | awk -v s="${service}" '$1 == s && $3 == "enabled" { f = 1 } END { exit !f }'; then
+            missing="${missing} ${service}"
+        fi
+    done
+
+    if [ -n "${missing}" ]; then
+        echo "FATAL: Ubuntu Pro service(s) not enabled:${missing}" >&2
+        echo "This AMI would ship without ESM and quietly stop receiving those fixes." >&2
+        pro status --all >&2 || true
+        return 1
+    fi
+    echo "pro check: ${required[*]} enabled"
+}
+
 cleanup_timer_stamps() {
     # Persistent=true timers record their last trigger here. If these survive
     # into the snapshot, every launched instance sees a last-trigger of AMI
@@ -75,9 +130,9 @@ cleanup_timer_stamps() {
 
 configure_apt_lock_timeout
 
-apt-get update
-apt-get -y upgrade
-apt-get -y install --no-install-recommends \
+with_retry apt-get update
+with_retry apt-get -y upgrade
+with_retry apt-get -y install --no-install-recommends \
   gpg \
   lsb-release \
   curl \
@@ -103,8 +158,8 @@ rm -f "${tmpkey}"
 echo "deb [signed-by=${KEYRING_PATH}] ${REPO_URL} ${UBUNTU_CODENAME} main" \
   | tee "${REPO_LIST}" >/dev/null
 
-apt-get update
-apt-get -y install --no-install-recommends \
+with_retry apt-get update
+with_retry apt-get -y install --no-install-recommends \
   awscli \
   build-essential \
   infrahouse-toolkit \
@@ -124,11 +179,10 @@ apt-get -y install --no-install-recommends \
 export PATH=/opt/puppetlabs/puppet/bin:$PATH
 for g in json aws-sdk-core aws-sdk-secretsmanager
 do
-  gem install "$g"
+  with_retry gem install "$g"
 done
 
-pro auto-attach || true
-pro enable esm-infra esm-apps || true
+enable_ubuntu_pro
 
 verify_kernel_current
 
