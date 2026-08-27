@@ -5,6 +5,29 @@ set -o pipefail
 
 export DEBIAN_FRONTEND=noninteractive
 
+with_retry() {
+    # Retry the failing command, not the whole provisioner.
+    #
+    # packer's provisioner-level max_retries re-runs this script from the top,
+    # which is minutes of work to recover from one flaky mirror, hides which step
+    # was actually flaky, and silently demands that every step be idempotent.
+    # `pro enable` is not: on the second pass it reports "already enabled" and
+    # exits non-zero, so a coarse retry turns a healthy state into an error.
+    #
+    # curl already does this for itself further down (--retry 5).
+    local attempt=1 max=5 delay
+    until "$@"; do
+        if [ "${attempt}" -ge "${max}" ]; then
+            echo "FATAL: '$*' failed after ${max} attempts" >&2
+            return 1
+        fi
+        delay=$(( attempt * 10 ))
+        echo "retry ${attempt}/${max} in ${delay}s: $*" >&2
+        sleep "${delay}"
+        attempt=$(( attempt + 1 ))
+    done
+}
+
 configure_apt_lock_timeout() {
     # Puppet's Package provider, cloud-init and the AWS agents (guardduty,
     # inspector) all shell out to apt-get without options, so a global drop-in
@@ -27,6 +50,90 @@ cleanup_system_ids() {
     rm -f /home/ubuntu/.bash_history || true
 }
 
+verify_kernel_current() {
+    # The image must not ship a kernel older than the archive offers.
+    #
+    # Guards a specific trap: `apt-get upgrade` never installs *new* packages. A
+    # kernel metapackage bump that crosses a series (6.17.x -> 7.0.x) needs a
+    # brand-new linux-image-<version>-aws binary, so apt silently keeps it back
+    # and the build still succeeds. The AMI then ships a stale kernel, every
+    # instance installs the newer one at boot via unattended-upgrade, and none of
+    # them ever runs it -- instances here are replaced, not rebooted. Nothing
+    # about that is visible without this check: `uname -r` on a fresh instance
+    # disagrees with `dpkg -l`, and /var/run/reboot-required is not written.
+    #
+    # Deliberately compares against the candidate rather than asserting a
+    # specific apt flag, so it also catches a pinned kernel, a held package, a
+    # stale mirror, or any future cause.
+    #
+    # Must run while /var/lib/apt/lists is still populated -- apt-cache needs it.
+    local metapackage installed candidate
+    metapackage="linux-image-aws"
+    installed=$(dpkg-query -W -f='${Version}' "${metapackage}")
+    candidate=$(apt-cache policy "${metapackage}" | awk '/Candidate:/ {print $2}')
+
+    if [ "${installed}" != "${candidate}" ]; then
+        echo "FATAL: ${metapackage} is ${installed}, archive offers ${candidate}." >&2
+        echo "The upgrade step did not take it, so this AMI would ship a stale kernel." >&2
+        echo "A series change needs --with-new-pkgs (or dist-upgrade); plain" >&2
+        echo "'apt-get upgrade' keeps it back. apt says:" >&2
+        apt-get -s upgrade 2>/dev/null | sed -n '/kept back/,+2p' >&2 || true
+        return 1
+    fi
+    echo "kernel check: ${metapackage} ${installed} matches the archive candidate"
+}
+
+pro_attached() {
+    pro status --format json 2>/dev/null | jq -e '.attached == true' >/dev/null
+}
+
+pro_service_enabled() {
+    pro status --format json 2>/dev/null \
+        | jq -e --arg s "$1" 'any(.services[]; .name == $s and .status == "enabled")' >/dev/null
+}
+
+enable_ubuntu_pro() {
+    # Act only where the state is wrong, so every command that runs is expected
+    # to succeed and none of them needs `|| true`.
+    #
+    # The guard is the whole point. `pro auto-attach` exits non-zero on an
+    # already-attached machine and `pro enable` exits non-zero on an
+    # already-enabled service -- and on a Pro marketplace image both are the
+    # normal case, not an edge case, because ubuntu-advantage.service attaches at
+    # boot. Calling them unconditionally is what forced the old `|| true`, and
+    # that in turn meant a genuine failure would have shipped an AMI with ESM
+    # off: healthy-looking for weeks, then a pile of vulnerabilities in packages
+    # that had quietly stopped receiving fixes.
+    #
+    # Reads `pro status --format json` (.attached, .services[].name/.status)
+    # rather than the human table, which is not a stable interface. jq is
+    # installed further up, before this runs.
+    local -a required=(esm-infra esm-apps)
+    local service missing=""
+
+    pro_attached || pro auto-attach
+
+    for service in "${required[@]}"; do
+        pro_service_enabled "${service}" || pro enable "${service}"
+    done
+
+    # Re-read rather than trusting the commands above: this is the assertion that
+    # the AMI is actually entitled to the fixes it will be expected to receive.
+    for service in "${required[@]}"; do
+        pro_service_enabled "${service}" || missing="${missing} ${service}"
+    done
+
+    if [ -n "${missing}" ]; then
+        echo "FATAL: Ubuntu Pro service(s) not enabled:${missing}" >&2
+        echo "This AMI would ship without ESM and quietly stop receiving those fixes." >&2
+        # Diagnostic on a path that is already failing; do not let it mask the
+        # real error.
+        pro status --all >&2 || true
+        return 1
+    fi
+    echo "pro check: ${required[*]} enabled"
+}
+
 cleanup_timer_stamps() {
     # Persistent=true timers record their last trigger here. If these survive
     # into the snapshot, every launched instance sees a last-trigger of AMI
@@ -42,9 +149,14 @@ cleanup_timer_stamps() {
 
 configure_apt_lock_timeout
 
-apt-get update
-apt-get -y upgrade
-apt-get -y install --no-install-recommends \
+with_retry apt-get update
+# --with-new-pkgs, not plain upgrade: `apt-get upgrade` never installs new
+# packages, so a kernel metapackage bump that crosses a series (6.17.x -> 7.0.x)
+# needs a brand-new linux-image-<version>-aws binary and gets kept back, along
+# with linux-aws and linux-headers-aws. Unlike dist-upgrade this still never
+# removes anything. verify_kernel_current below asserts the result.
+with_retry apt-get -y --with-new-pkgs upgrade
+with_retry apt-get -y install --no-install-recommends \
   gpg \
   lsb-release \
   curl \
@@ -70,8 +182,8 @@ rm -f "${tmpkey}"
 echo "deb [signed-by=${KEYRING_PATH}] ${REPO_URL} ${UBUNTU_CODENAME} main" \
   | tee "${REPO_LIST}" >/dev/null
 
-apt-get update
-apt-get -y install --no-install-recommends \
+with_retry apt-get update
+with_retry apt-get -y install --no-install-recommends \
   awscli \
   build-essential \
   infrahouse-toolkit \
@@ -91,11 +203,12 @@ apt-get -y install --no-install-recommends \
 export PATH=/opt/puppetlabs/puppet/bin:$PATH
 for g in json aws-sdk-core aws-sdk-secretsmanager
 do
-  gem install "$g"
+  with_retry gem install "$g"
 done
 
-pro auto-attach || true
-pro enable esm-infra esm-apps || true
+enable_ubuntu_pro
+
+verify_kernel_current
 
 apt-get -y autoremove --purge
 apt-get clean
