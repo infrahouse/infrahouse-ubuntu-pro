@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
 import pytest
+from botocore.exceptions import ClientError
 
 import ami_retention
 
@@ -76,11 +77,17 @@ class FakePaginator:  # pylint: disable=too-few-public-methods
 
 
 class FakeEC2:
-    """EC2 client that records mutations instead of making them."""
+    """EC2 client that records mutations instead of making them.
 
-    def __init__(self, images: List[Dict]):
+    DryRun probes are answered the way EC2 answers them -- by raising, with
+    ``DryRunOperation`` meaning permitted -- and are never recorded as calls, so
+    an assertion on ``calls`` is an assertion about real mutations only.
+    """
+
+    def __init__(self, images: List[Dict], denied: Optional[List[str]] = None):
         self.images = images
         self.calls: List[tuple] = []
+        self.denied = set(denied or [])
 
     def get_paginator(self, name: str) -> FakePaginator:
         """Return a paginator over the canned images."""
@@ -88,7 +95,9 @@ class FakeEC2:
         return FakePaginator(self.images)
 
     def modify_image_attribute(self, **kwargs) -> None:
-        """Record an unpublish."""
+        """Record an unpublish, or answer a permission probe."""
+        if kwargs.pop("DryRun", False):
+            self._probe("modify_image_attribute")
         self.calls.append(("unpublish", kwargs["ImageId"]))
 
     def deregister_image(self, **kwargs) -> None:
@@ -96,8 +105,17 @@ class FakeEC2:
         self.calls.append(("deregister", kwargs["ImageId"]))
 
     def delete_snapshot(self, **kwargs) -> None:
-        """Record a snapshot delete."""
+        """Record a snapshot delete, or answer a permission probe."""
+        if kwargs.pop("DryRun", False):
+            self._probe("delete_snapshot")
         self.calls.append(("delete_snapshot", kwargs["SnapshotId"]))
+
+    def _probe(self, operation: str) -> None:
+        """Raise as EC2 does for a DryRun: permitted is also an exception."""
+        code = (
+            "UnauthorizedOperation" if operation in self.denied else "DryRunOperation"
+        )
+        raise ClientError({"Error": {"Code": code, "Message": operation}}, operation)
 
 
 class ParameterNotFound(Exception):
@@ -124,33 +142,39 @@ class FakeSSM:  # pylint: disable=too-few-public-methods
 
 @pytest.fixture(name="prune")
 def prune_fixture(monkeypatch):
-    """Run prune_region against fake clients and hand back the recorded calls."""
+    """Run prune_region against fake clients and hand back the fake EC2 client."""
 
     def run(
-        images: List[Dict], advertised: Optional[str] = None, dry_run: bool = False
-    ) -> List[tuple]:
-        ec2 = FakeEC2(images)
+        images: List[Dict],
+        advertised: Optional[str] = None,
+        dry_run: bool = False,
+        denied: Optional[List[str]] = None,
+    ) -> FakeEC2:
+        ec2 = FakeEC2(images, denied)
+        # Stashed before the call so a test that expects a raise can still
+        # assert on what was, and was not, mutated.
+        run.client = ec2
         monkeypatch.setattr(
             ami_retention.boto3,
             "client",
             lambda service, **kwargs: ec2 if service == "ec2" else FakeSSM(advertised),
         )
         ami_retention.prune_region("noble", "us-west-1", NOW, dry_run)
-        return ec2.calls
+        return ec2
 
     return run
 
 
 def test_image_inside_public_window_is_untouched(prune):
     """An image younger than PUBLIC_DAYS keeps its publication."""
-    assert prune(with_current(make_image("ami-young", age_days=3))) == []
+    assert prune(with_current(make_image("ami-young", age_days=3))).calls == []
 
 
 def test_image_past_public_window_is_unpublished(prune):
     """Between the two windows the image loses public access and nothing else."""
     assert prune(
         with_current(make_image("ami-mid", age_days=ami_retention.PUBLIC_DAYS + 1))
-    ) == [("unpublish", "ami-mid")]
+    ).calls == [("unpublish", "ami-mid")]
 
 
 def test_already_private_image_is_not_unpublished_again(prune):
@@ -162,7 +186,7 @@ def test_already_private_image_is_not_unpublished_again(prune):
                     "ami-priv", age_days=ami_retention.PUBLIC_DAYS + 1, public=False
                 )
             )
-        )
+        ).calls
         == []
     )
 
@@ -174,7 +198,7 @@ def test_image_past_delete_window_is_deregistered_with_its_snapshots(prune):
         age_days=ami_retention.DELETE_DAYS + 1,
         snapshots=["snap-a", "snap-b"],
     )
-    assert prune(with_current(image)) == [
+    assert prune(with_current(image)).calls == [
         ("deregister", "ami-old"),
         ("delete_snapshot", "snap-a"),
         ("delete_snapshot", "snap-b"),
@@ -188,7 +212,7 @@ def test_advertised_image_is_exempt_at_any_age(prune):
     parameter pointing at a deregistered AMI.
     """
     image = make_image("ami-current", age_days=ami_retention.DELETE_DAYS * 10)
-    assert prune([image], advertised="ami-current") == []
+    assert prune([image], advertised="ami-current").calls == []
 
 
 def test_unset_parameter_does_not_protect_an_arbitrary_image(prune):
@@ -196,7 +220,7 @@ def test_unset_parameter_does_not_protect_an_arbitrary_image(prune):
     image = make_image(
         "ami-orphan", age_days=ami_retention.DELETE_DAYS + 1, snapshots=["snap-o"]
     )
-    assert prune(with_current(image), advertised=None) == [
+    assert prune(with_current(image), advertised=None).calls == [
         ("deregister", "ami-orphan"),
         ("delete_snapshot", "snap-o"),
     ]
@@ -208,13 +232,13 @@ def test_dry_run_mutates_nothing(prune):
         make_image("ami-mid", age_days=ami_retention.PUBLIC_DAYS + 1),
         make_image("ami-old", age_days=ami_retention.DELETE_DAYS + 1),
     ]
-    assert prune(with_current(*images), dry_run=True) == []
+    assert prune(with_current(*images), dry_run=True).calls == []
 
 
 def test_image_with_no_snapshots_is_still_deregistered(prune):
     """A mapping without an EBS snapshot must not break the delete stage."""
     image = make_image("ami-bare", age_days=ami_retention.DELETE_DAYS + 1, snapshots=[])
-    assert prune(with_current(image)) == [("deregister", "ami-bare")]
+    assert prune(with_current(image)).calls == [("deregister", "ami-bare")]
 
 
 def test_newest_image_is_exempt_when_ssm_names_something_else(prune):
@@ -229,7 +253,7 @@ def test_newest_image_is_exempt_when_ssm_names_something_else(prune):
         make_image("ami-newest", age_days=ami_retention.PUBLIC_DAYS + 1),
         make_image("ami-older", age_days=ami_retention.PUBLIC_DAYS + 2),
     ]
-    assert prune(images, advertised="ami-canonical-base") == [
+    assert prune(images, advertised="ami-canonical-base").calls == [
         ("unpublish", "ami-older")
     ]
 
@@ -237,7 +261,43 @@ def test_newest_image_is_exempt_when_ssm_names_something_else(prune):
 def test_sole_image_is_never_deleted_however_old(prune):
     """A region must not end a run holding no image at all."""
     image = make_image("ami-only", age_days=ami_retention.DELETE_DAYS * 5)
-    assert prune([image], advertised=None) == []
+    assert prune([image], advertised=None).calls == []
+
+
+def test_undeletable_snapshot_leaves_the_image_registered(prune):
+    """The orphan guard: no permission to delete the snapshot, no deregister.
+
+    DeregisterImage is the point of no return -- afterwards the block device
+    mapping is gone and a snapshot nothing references is unfindable. Run
+    33904005088 deregistered an AMI in us-east-1 and was then refused
+    DeleteSnapshot, stranding snap-0d5770efda2ff3d58. The image must be left
+    exactly as it was so the next run can retry it.
+    """
+    image = make_image("ami-old", age_days=ami_retention.DELETE_DAYS + 1)
+    with pytest.raises(ClientError) as excinfo:
+        prune(with_current(image), denied=["delete_snapshot"])
+    assert excinfo.value.response["Error"]["Code"] == "UnauthorizedOperation"
+    # The assertion that matters. Without the probe the deregister lands first
+    # and this list holds ("deregister", "ami-old") -- the orphan, created.
+    assert prune.client.calls == []
+
+
+def test_undeletable_snapshot_is_caught_on_a_dry_run_too(prune):
+    """A dry run has to exercise the permission, or it validates nothing.
+
+    Skipping the probe when dry_run is set is what let run 33904005088 report a
+    clean dry run and then fail for real on the same images.
+    """
+    image = make_image("ami-old", age_days=ami_retention.DELETE_DAYS + 1)
+    with pytest.raises(ClientError):
+        prune(with_current(image), dry_run=True, denied=["delete_snapshot"])
+    assert prune.client.calls == []
+
+
+def test_permission_probes_are_not_mutations(prune):
+    """A permitted probe leaves no trace beyond the real call it precedes."""
+    image = make_image("ami-old", age_days=ami_retention.DELETE_DAYS + 1)
+    assert prune(with_current(image), dry_run=True).calls == []
 
 
 def test_windows_leave_room_between_them():

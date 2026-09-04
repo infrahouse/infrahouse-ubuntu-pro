@@ -67,7 +67,15 @@ jobs:
       # with ResourceLimitExceeded. Runs on every scheduled invocation, including
       # the ones that decide not to rebuild, so expiry follows the clock rather
       # than the build cadence.
+      # continue-on-error, with the gate at the end of the job: a retention
+      # failure must not stop an AMI shipping. Run 33904005088 proved the point
+      # -- one untaggable snapshot in us-east-1 failed the step, packer never
+      # ran, and a build carrying Ubuntu security updates was held back by a
+      # housekeeping permission. The job still goes red; it just goes red after
+      # publishing rather than instead of it.
       - name: Apply AMI retention
+        id: retention
+        continue-on-error: true
         run: python ami_retention.py
 
       - name: Packer init
@@ -76,3 +84,12 @@ jobs:
       - name: Packer build
         run: |
           python packer-build.py
+
+      # Deliberately last. Retention ran first so its freed quota slots were
+      # available to the build above; this reports its outcome without having
+      # blocked it.
+      - name: Fail if AMI retention did not complete
+        if: steps.retention.outcome == 'failure'
+        run: |
+          echo "::error::AMI retention failed; see the 'Apply AMI retention' step above."
+          exit 1
