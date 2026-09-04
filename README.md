@@ -18,6 +18,7 @@ AMIs are rebuilt automatically every 6 hours to incorporate the latest Ubuntu Pr
 * Incremental builds - only rebuilds when Canonical publishes a new base AMI
 * Manual trigger with force-rebuild option
 * Published as public AMIs (built in us-west-1, copied to configurable regions)
+* Age-based AMI retention - unpublished at 30 days, deregistered at 90, never count-based
 
 ## Installed Packages
 
@@ -35,18 +36,39 @@ The AMI includes the following on top of the Ubuntu Pro base:
 ### Build Flow
 
 1. **GitHub Actions** triggers on schedule (every 6 hours) or manual dispatch
-2. **packer-build.py** checks if Canonical has published a new Ubuntu Pro base AMI
+2. **ami_retention.py** expires old AMIs in every published region, before the build
+   - Frees public-AMI quota slots the build is about to need
+3. **packer-build.py** checks if Canonical has published a new Ubuntu Pro base AMI
    - Compares the current base AMI ID (from SSM) with the latest Canonical AMI
    - Skips the build if unchanged (unless force-rebuild is set)
-3. **Packer** launches an EC2 instance from the latest Ubuntu Pro base
-4. **provision.sh** runs inside the instance:
+4. **Packer** launches an EC2 instance from the latest Ubuntu Pro base
+5. **provision.sh** runs inside the instance:
    - Upgrades all system packages
    - Adds the InfraHouse APT repository with GPG key fingerprint verification
    - Installs required packages and Ruby gems
    - Enables Ubuntu Pro ESM features
    - Cleans up logs and system IDs for AMI optimization
-5. Packer creates the AMI and publishes it publicly
-6. The new base AMI ID is saved to SSM for future comparison
+6. Packer creates the AMI and publishes it publicly
+7. The new base AMI ID is saved to SSM for future comparison
+
+### AMI Retention
+
+Retention is keyed on age, never on how many AMIs exist. A count-based policy deletes recent images
+exactly when churn is highest, which is when they matter most, so this policy would rather leave the
+account over its quota - and say so - than deregister something a few days old.
+
+| Age | What happens | Why |
+|-----|--------------|-----|
+| 0-30 days | Public | Consumers can resolve and pin the AMI ID |
+| 30 days | Launch permission removed | Frees a public-AMI quota slot; still launchable by this account |
+| 90 days | Deregistered, snapshots deleted | Rollback depth expires |
+
+The AMI that `/infrahouse/ubuntu-pro/latest/{codename}` advertises is exempt at any age, so a quiet
+spell can never leave the parameter pointing at a deregistered image.
+
+The public window is what governs the per-region **Public AMIs** quota (default 5, adjustable):
+`public window x AMIs published per day <= quota`. A 30-day window at the observed ~1.3 AMIs/day needs
+a quota of roughly 40.
 
 ## AWS Integration
 
@@ -70,8 +92,10 @@ The AMI includes the following on top of the Ubuntu Pro base:
 |------|---------|
 | `packer.pkr.hcl` | Packer build definition - source AMI filter, instance config, output AMI |
 | `packer-build.py` | Python orchestration - SSM parameters, SSH key handling, incremental builds |
+| `ami_retention.py` | Age-based AMI retention - unpublish, then deregister with snapshots |
 | `provision.sh` | Bash provisioning - package installation, repo setup, Ubuntu Pro enablement |
 | `.github/workflows/packer.yml` | GitHub Actions workflow - scheduled and manual triggers |
+| `tests/` | pytest suite for the retention policy |
 
 ## Manual Build
 
@@ -86,6 +110,12 @@ python packer-build.py
 
 # Force a rebuild regardless of base AMI changes
 FORCE_REBUILD=true python packer-build.py
+
+# Report what retention would remove, without removing it
+RETENTION_DRY_RUN=true python ami_retention.py
+
+# Apply retention
+python ami_retention.py
 ```
 
 To run Packer directly:
@@ -108,3 +138,5 @@ packer build \
 * [Packer Amazon plugin](https://github.com/hashicorp/packer-plugin-amazon) >= 1.3.0
 * Python 3 with [boto3](https://pypi.org/project/boto3/)
 * AWS credentials with permissions for EC2, SSM, and AMI management
+  (retention additionally needs `ec2:DeregisterImage` and `ec2:DeleteSnapshot`)
+* [pytest](https://pytest.org/) to run the test suite: `pytest`

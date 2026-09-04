@@ -20,6 +20,8 @@ The build process:
 2. **packer-build.py** orchestrates the build - retrieves SSH keys and parameters from AWS SSM Parameter Store, invokes Packer, stores the resulting AMI ID back in SSM
 3. **packer.pkr.hcl** defines the Packer build configuration - filters for latest Canonical Ubuntu Pro base image
 4. **provision.sh** runs inside the instance to install packages, configure the InfraHouse APT repository, enable Ubuntu Pro features, and clean up for AMI optimization
+5. **ami_retention.py** runs *before* the build in the same job, expiring old AMIs by age so the
+   public-AMI quota slot the build needs exists by the time packer publishes
 
 ## Key Files
 
@@ -28,6 +30,7 @@ The build process:
 | `packer.pkr.hcl` | Packer build definition (HCL) - source AMI filter, instance type, output AMI config |
 | `packer-build.py` | Python orchestration - SSM parameter handling, SSH key management, Packer invocation |
 | `provision.sh` | Bash provisioning - package installation, repo setup, Ubuntu Pro enablement |
+| `ami_retention.py` | Age-based AMI retention - unpublish at 30 days, deregister at 90 |
 
 ## Build Commands
 
@@ -52,4 +55,4 @@ packer build -var 'region=us-west-1' \
 - **Authentication**: OIDC for GitHub Actions
 - **SSM Parameters**:
   - `/infrahouse/ubuntu-pro/args` - Build configuration (SecureString)
-  - `/infrahouse/ubuntu-pro/latest/{codename}` - Last built AMI ID
+  - `/infrahouse/ubuntu-pro/latest/{codename}` - Last built AMI ID (exempt from retention at any age)
