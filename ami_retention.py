@@ -27,9 +27,10 @@ mean the same thing in every region; see prune_region.
 import json
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 import boto3
+from botocore.exceptions import ClientError
 
 # Days an AMI stays public. This is a contract with consumers -- an AMI id pinned
 # in someone else's launch template keeps working for this long -- and it is also
@@ -128,6 +129,28 @@ def advertised_image(codename: str, region: str) -> Optional[str]:
     return resp["Parameter"]["Value"]
 
 
+class RetentionError(RuntimeError):
+    """One or more regions could not be pruned."""
+
+
+def assert_permitted(call: Callable, **kwargs) -> None:
+    """Check that *call* would be allowed, without performing it.
+
+    EC2 answers this with the DryRun flag, and signals the permitted case by
+    raising ``DryRunOperation`` -- so here the exception is the success path and
+    anything else propagates.
+
+    :param call: A bound EC2 client method that accepts ``DryRun``.
+    :param kwargs: The arguments the real call would receive.
+    :raises ClientError: if the call would not be permitted.
+    """
+    try:
+        call(DryRun=True, **kwargs)
+    except ClientError as err:
+        if err.response["Error"]["Code"] != "DryRunOperation":
+            raise
+
+
 def unpublish_image(ec2, image: Dict, dry_run: bool) -> None:
     """Drop the ``all`` group launch permission from *image*.
 
@@ -139,12 +162,15 @@ def unpublish_image(ec2, image: Dict, dry_run: bool) -> None:
     :param dry_run: When true, report the action and change nothing.
     """
     print(f"  unpublish {image['ImageId']} {image['Name']}")
+    permission = {"Remove": [{"Group": "all"}]}
+    assert_permitted(
+        ec2.modify_image_attribute,
+        ImageId=image["ImageId"],
+        LaunchPermission=permission,
+    )
     if dry_run:
         return
-    ec2.modify_image_attribute(
-        ImageId=image["ImageId"],
-        LaunchPermission={"Remove": [{"Group": "all"}]},
-    )
+    ec2.modify_image_attribute(ImageId=image["ImageId"], LaunchPermission=permission)
 
 
 def delete_image(ec2, image: Dict, dry_run: bool) -> None:
@@ -155,9 +181,23 @@ def delete_image(ec2, image: Dict, dry_run: bool) -> None:
     invisible, unreferenced, and billed forever. They are deleted after, because
     a snapshot backing a registered AMI cannot be deleted.
 
+    That ordering is forced, and it makes DeregisterImage a point of no return:
+    a DeleteSnapshot that fails after it has succeeded leaves exactly the
+    orphan the ordering was meant to avoid. Run 33904005088 did this in
+    us-east-1 -- the AMI deregistered, then DeleteSnapshot came back
+    UnauthorizedOperation, and snap-0d5770efda2ff3d58 has nothing pointing at
+    it. So every snapshot is checked for permission first, and the image is
+    left alone if any of them would fail.
+
+    The check runs on dry runs too. A dry run that skipped it would report a
+    deletion that the real run cannot perform, which is how the above reached
+    production.
+
     :param ec2: An EC2 client bound to the image's region.
     :param image: The image to remove.
     :param dry_run: When true, report the action and change nothing.
+    :raises ClientError: if any snapshot could not be deleted. The image stays
+        registered, so nothing is orphaned and the next run retries it.
     """
     snapshots = [
         mapping["Ebs"]["SnapshotId"]
@@ -167,6 +207,8 @@ def delete_image(ec2, image: Dict, dry_run: bool) -> None:
     print(
         f"  delete {image['ImageId']} {image['Name']} snapshots={','.join(snapshots) or 'none'}"
     )
+    for snapshot_id in snapshots:
+        assert_permitted(ec2.delete_snapshot, SnapshotId=snapshot_id)
     if dry_run:
         return
     ec2.deregister_image(ImageId=image["ImageId"])
@@ -255,6 +297,14 @@ def main() -> None:
 
     Runs before the build rather than after it. Pruning after would free slots
     that the build it just failed to publish had already needed.
+
+    Regions are independent, so a failure in one is recorded and the rest still
+    run. Run 33904005088 stopped at the first error in us-east-1 and left
+    us-east-2 and us-west-2 untouched, which turned one region's problem into
+    three and hid two thirds of it until the next run.
+
+    :raises RetentionError: if any region failed, after all of them have been
+        attempted.
     """
     codename = os.environ["UBUNTU_CODENAME"]
     dry_run = os.environ.get("RETENTION_DRY_RUN", "false").lower() == "true"
@@ -264,8 +314,20 @@ def main() -> None:
         f"retention: public at {PUBLIC_DAYS}d, delete at {DELETE_DAYS}d"
         + (" (dry run)" if dry_run else "")
     )
+    failed: Dict[str, str] = {}
     for region in build_regions():
-        prune_region(codename, region, now, dry_run)
+        try:
+            prune_region(codename, region, now, dry_run)
+        except ClientError as err:
+            failed[region] = str(err)
+            print(f"{region}: FAILED -- {err}")
+
+    if failed:
+        raise RetentionError(
+            "retention failed in "
+            + ", ".join(sorted(failed))
+            + " -- the other regions completed"
+        )
 
 
 if __name__ == "__main__":
