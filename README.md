@@ -67,8 +67,12 @@ The AMI that `/infrahouse/ubuntu-pro/latest/{codename}` advertises is exempt at 
 spell can never leave the parameter pointing at a deregistered image.
 
 The public window is what governs the per-region **Public AMIs** quota (default 5, adjustable):
-`public window x AMIs published per day <= quota`. A 30-day window at the observed ~1.3 AMIs/day needs
-a quota of roughly 40.
+`public window x AMIs published per day <= quota`. Publication runs at ~0.1 AMIs/day (measured from the
+images: 20 spanning 211 days), so a 30-day window settles at about 5 public AMIs against the current
+quota of 20.
+
+Size this from the AMIs, not from workflow runs. The build runs every 6 hours and mostly decides not to
+build, and failed runs produce no image at all - counting runs overstates the rate roughly tenfold.
 
 ## AWS Integration
 

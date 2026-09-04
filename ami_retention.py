@@ -35,12 +35,16 @@ import boto3
 #
 #     public window (days) x AMIs published per day <= quota
 #
-# At the ~1.3 AMIs/day observed in Sep 2026, 30 days needs a quota of about 40.
-# The quota defaults to 5 and is adjustable; this account was at 20 in us-west-1
-# when this was written, which is where build 33890534131 died with
-# ResourceLimitExceeded. Until the increase lands, publication keeps failing --
-# shortening this window to paper over that would be the count-based policy
-# wearing a disguise.
+# Measured from the images themselves in Sep 2026, publication runs at ~0.1
+# AMIs/day (20 images spanning 211 days), so a 30-day window settles at about 5
+# public AMIs against a quota of 20. Build 33890534131 died with
+# ResourceLimitExceeded not because that rate is high but because nothing had
+# ever been removed: 211 days of images, none expired.
+#
+# Do not size this window from the *build* cadence. The workflow runs every 6
+# hours and mostly decides not to build, and failed runs never produce an image
+# at all -- counting runs instead of images overstates the rate by an order of
+# magnitude.
 #
 # The quota counts public AMIs *including those in the Recycle Bin*. Unpublishing
 # frees the slot outright; deregistering alone would not, if a Recycle Bin rule
@@ -181,16 +185,28 @@ def prune_region(codename: str, region: str, now: datetime, dry_run: bool) -> No
     advertised = advertised_image(codename, region)
     print(f"{region}: retention for {codename}, advertised {advertised or 'unset'}")
 
+    freed = 0
     for image in find_build_images(ec2, codename):
         if image["ImageId"] == advertised:
             continue
         age = image_age(image, now)
         if age >= timedelta(days=DELETE_DAYS):
             delete_image(ec2, image, dry_run)
+            freed += int(bool(image.get("Public")))
         elif age >= timedelta(days=PUBLIC_DAYS) and image.get("Public"):
             unpublish_image(ec2, image, dry_run)
+            freed += 1
 
-    print(f"{region}: {count_public_images(ec2)} public AMIs owned after retention")
+    # A dry run has freed nothing, so reporting the live count as the result
+    # would read as "retention ran and changed nothing" -- the one message this
+    # step must never send by accident.
+    public = count_public_images(ec2)
+    if dry_run:
+        print(
+            f"{region}: {public} public AMIs owned, {freed} would be freed -> {public - freed}"
+        )
+    else:
+        print(f"{region}: {public} public AMIs owned after retention")
 
 
 def build_regions() -> List[str]:
