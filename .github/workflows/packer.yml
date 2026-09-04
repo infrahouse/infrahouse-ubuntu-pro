@@ -10,6 +10,10 @@ on:  # yamllint disable-line rule:truthy
         description: 'Force rebuild even if base AMI unchanged'
         type: boolean
         default: false
+      retention_dry_run:
+        description: 'Report what AMI retention would remove, without removing it'
+        type: boolean
+        default: false
 
 concurrency:
   group: schedule-6h
@@ -43,6 +47,7 @@ jobs:
     env:
       UBUNTU_CODENAME: ${{ matrix.ubuntu_codename }}
       FORCE_REBUILD: ${{ github.event.inputs.force_rebuild || 'false' }}
+      RETENTION_DRY_RUN: ${{ github.event.inputs.retention_dry_run || 'false' }}
 
     steps:
       # Checkout the repository to the GitHub Actions runner
@@ -55,6 +60,15 @@ jobs:
           role-to-assume: ${{ env.ROLE_ARN}}
           role-session-name: packer-build
           aws-region: ${{ env.AWS_REGION }}
+
+      # Before the build, not after. Retention frees public-AMI quota slots, and
+      # the slot this build needs has to exist by the time packer publishes --
+      # pruning afterwards would tidy up for a build that had already failed
+      # with ResourceLimitExceeded. Runs on every scheduled invocation, including
+      # the ones that decide not to rebuild, so expiry follows the clock rather
+      # than the build cadence.
+      - name: Apply AMI retention
+        run: python ami_retention.py
 
       - name: Packer init
         run: packer init .
