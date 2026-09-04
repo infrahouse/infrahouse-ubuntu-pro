@@ -16,10 +16,12 @@ Splitting them decouples the quota from the retention window. The "Public AMIs"
 quota counts only public images, so unpublishing frees a slot immediately while
 the image itself survives for rollback at the cost of snapshot storage.
 
-The AMI that SSM currently advertises is exempt from both stages at any age.
-That is referential integrity, not retention: it is what consumers resolve right
-now, and expiring it would leave the pointer dangling after a quiet spell in
-which nothing new was built.
+Two images are exempt from both stages at any age: whatever SSM advertises, and
+the newest one built. That is referential integrity, not retention -- a quiet
+spell long enough to age out everything must not leave a region with no image,
+or the pointer aimed at something deregistered. The newest is named
+independently of SSM because /infrahouse/ubuntu-pro/latest/{codename} does not
+mean the same thing in every region; see prune_region.
 """
 
 import json
@@ -182,12 +184,33 @@ def prune_region(codename: str, region: str, now: datetime, dry_run: bool) -> No
     :param dry_run: When true, report what would happen and change nothing.
     """
     ec2 = boto3.client("ec2", region_name=region)
-    advertised = advertised_image(codename, region)
-    print(f"{region}: retention for {codename}, advertised {advertised or 'unset'}")
+    images = find_build_images(ec2, codename)
+
+    # Exempt from both stages regardless of age: whatever SSM advertises, and the
+    # newest image we built.
+    #
+    # The newest is listed separately rather than trusting SSM to name it,
+    # because /infrahouse/ubuntu-pro/latest/{codename} does not mean the same
+    # thing in every region. In the copy regions store_regional_ami_ids() writes
+    # the AMI packer copied there. In the build region set_last_base() runs
+    # afterwards and writes Canonical's *base* AMI to the same name -- that is
+    # the rebuild trigger's memory, working as designed, and it is simply not an
+    # id this module will ever match. Keyed on SSM alone the exemption would be
+    # inert in exactly the region the build runs in, so a stall longer than
+    # PUBLIC_DAYS would unpublish the newest image there with nothing guarding it.
+    #
+    # This is a floor of one, not a count-based policy: it never expires anything
+    # early, it only refuses to leave a region with no image at all.
+    exempt = {advertised_image(codename, region)}
+    if images:
+        exempt.add(images[0]["ImageId"])
+    print(
+        f"{region}: retention for {codename}, exempt {', '.join(sorted(i for i in exempt if i))}"
+    )
 
     freed = 0
-    for image in find_build_images(ec2, codename):
-        if image["ImageId"] == advertised:
+    for image in images:
+        if image["ImageId"] in exempt:
             continue
         age = image_age(image, now)
         if age >= timedelta(days=DELETE_DAYS):

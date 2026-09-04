@@ -63,8 +63,15 @@ account over its quota - and say so - than deregister something a few days old.
 | 30 days | Launch permission removed | Frees a public-AMI quota slot; still launchable by this account |
 | 90 days | Deregistered, snapshots deleted | Rollback depth expires |
 
-The AMI that `/infrahouse/ubuntu-pro/latest/{codename}` advertises is exempt at any age, so a quiet
-spell can never leave the parameter pointing at a deregistered image.
+Two images are exempt at any age: whatever `/infrahouse/ubuntu-pro/latest/{codename}` advertises, and the
+newest one built. A quiet spell can never leave a region with no image, or the parameter pointing at a
+deregistered one.
+
+The newest is exempt independently of SSM because that parameter does not mean the same thing in every
+region. In the copy regions `store_regional_ami_ids()` writes the AMI packer copied there; in the build
+region `set_last_base()` runs afterwards and writes Canonical's *base* AMI to the same name - the rebuild
+trigger's memory, working as designed, and not an ID this module will ever match. Keyed on SSM alone the
+exemption would be inert in exactly the region the build runs in.
 
 The public window is what governs the per-region **Public AMIs** quota (default 5, adjustable):
 `public window x AMIs published per day <= quota`. Publication runs at ~0.1 AMIs/day (measured from the

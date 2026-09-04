@@ -43,6 +43,19 @@ def make_image(
     }
 
 
+def with_current(*images: Dict) -> List[Dict]:
+    """Put *images* in a region that also holds a fresh build.
+
+    The newest image is exempt by design, so a lone old image is exempt too. Any
+    test expecting an image to be acted on has to say that a current build
+    exists, or it passes for the wrong reason.
+
+    :param images: Older images, in any order.
+    :return: Those images preceded by a freshly built one.
+    """
+    return [make_image("ami-current-build", age_days=0), *images]
+
+
 class FakePaginator:  # pylint: disable=too-few-public-methods
     """Single-page paginator over a fixed list of images."""
 
@@ -130,25 +143,25 @@ def prune_fixture(monkeypatch):
 
 def test_image_inside_public_window_is_untouched(prune):
     """An image younger than PUBLIC_DAYS keeps its publication."""
-    assert prune([make_image("ami-young", age_days=3)]) == []
+    assert prune(with_current(make_image("ami-young", age_days=3))) == []
 
 
 def test_image_past_public_window_is_unpublished(prune):
     """Between the two windows the image loses public access and nothing else."""
-    assert prune([make_image("ami-mid", age_days=ami_retention.PUBLIC_DAYS + 1)]) == [
-        ("unpublish", "ami-mid")
-    ]
+    assert prune(
+        with_current(make_image("ami-mid", age_days=ami_retention.PUBLIC_DAYS + 1))
+    ) == [("unpublish", "ami-mid")]
 
 
 def test_already_private_image_is_not_unpublished_again(prune):
     """A private image in the middle window costs no API call."""
     assert (
         prune(
-            [
+            with_current(
                 make_image(
                     "ami-priv", age_days=ami_retention.PUBLIC_DAYS + 1, public=False
                 )
-            ]
+            )
         )
         == []
     )
@@ -161,7 +174,7 @@ def test_image_past_delete_window_is_deregistered_with_its_snapshots(prune):
         age_days=ami_retention.DELETE_DAYS + 1,
         snapshots=["snap-a", "snap-b"],
     )
-    assert prune([image]) == [
+    assert prune(with_current(image)) == [
         ("deregister", "ami-old"),
         ("delete_snapshot", "snap-a"),
         ("delete_snapshot", "snap-b"),
@@ -183,7 +196,7 @@ def test_unset_parameter_does_not_protect_an_arbitrary_image(prune):
     image = make_image(
         "ami-orphan", age_days=ami_retention.DELETE_DAYS + 1, snapshots=["snap-o"]
     )
-    assert prune([image], advertised=None) == [
+    assert prune(with_current(image), advertised=None) == [
         ("deregister", "ami-orphan"),
         ("delete_snapshot", "snap-o"),
     ]
@@ -195,13 +208,36 @@ def test_dry_run_mutates_nothing(prune):
         make_image("ami-mid", age_days=ami_retention.PUBLIC_DAYS + 1),
         make_image("ami-old", age_days=ami_retention.DELETE_DAYS + 1),
     ]
-    assert prune(images, dry_run=True) == []
+    assert prune(with_current(*images), dry_run=True) == []
 
 
 def test_image_with_no_snapshots_is_still_deregistered(prune):
     """A mapping without an EBS snapshot must not break the delete stage."""
     image = make_image("ami-bare", age_days=ami_retention.DELETE_DAYS + 1, snapshots=[])
-    assert prune([image]) == [("deregister", "ami-bare")]
+    assert prune(with_current(image)) == [("deregister", "ami-bare")]
+
+
+def test_newest_image_is_exempt_when_ssm_names_something_else(prune):
+    """The build region's parameter holds Canonical's base AMI, not one of ours.
+
+    advertised_image() there returns an id find_build_images() can never match,
+    so an exemption keyed on SSM alone would be inert in exactly the region the
+    build runs in, and a stall past PUBLIC_DAYS would unpublish the newest image
+    with nothing guarding it.
+    """
+    images = [
+        make_image("ami-newest", age_days=ami_retention.PUBLIC_DAYS + 1),
+        make_image("ami-older", age_days=ami_retention.PUBLIC_DAYS + 2),
+    ]
+    assert prune(images, advertised="ami-canonical-base") == [
+        ("unpublish", "ami-older")
+    ]
+
+
+def test_sole_image_is_never_deleted_however_old(prune):
+    """A region must not end a run holding no image at all."""
+    image = make_image("ami-only", age_days=ami_retention.DELETE_DAYS * 5)
+    assert prune([image], advertised=None) == []
 
 
 def test_windows_leave_room_between_them():
