@@ -28,6 +28,31 @@ with_retry() {
     done
 }
 
+wait_for_cloud_init() {
+    # Resolve every package against one apt mirror, not two.
+    #
+    # The source AMI ships /etc/apt/sources.list.d/ubuntu.sources pointing at
+    # archive.ubuntu.com, and cloud-init's apt module rewrites it to the AZ-local
+    # mirror (us-west-1.ec2.archive.ubuntu.com) in the config stage -- which finishes
+    # well after sshd starts accepting connections, so packer's pause_before does not
+    # cover it. Without this wait the upgrade below resolves against the global
+    # archive while everything after the second apt-get update, verify_kernel_current
+    # included, resolves against the regional one.
+    #
+    # That is not theoretical: on 2026-09-04 the two disagreed about linux-image-aws
+    # (1011 vs 1012). The upgrade saw installed == candidate and reported nothing to
+    # do -- not even a kept-back package -- and the check then failed the build over a
+    # stale kernel it had never been offered.
+    #
+    # Also removes the dpkg lock race against cloud-init's own package work.
+    #
+    # The exit code is reported but not fatal: `--wait` returns cloud-init's health
+    # (1 error, 2 degraded), and what this build needs is only that cloud-init has
+    # *finished*. A cloud-init that failed to rewrite the mirror leaves the script on
+    # archive.ubuntu.com for its whole run, which is still self-consistent.
+    cloud-init status --wait || echo "WARNING: cloud-init finished in a non-ok state: $(cloud-init status)" >&2
+}
+
 configure_apt_lock_timeout() {
     # Puppet's Package provider, cloud-init and the AWS agents (guardduty,
     # inspector) all shell out to apt-get without options, so a global drop-in
@@ -147,6 +172,7 @@ cleanup_timer_stamps() {
     rm -rf /var/lib/systemd/timers/ || true
 }
 
+wait_for_cloud_init
 configure_apt_lock_timeout
 
 with_retry apt-get update
