@@ -227,10 +227,15 @@ with_retry apt-get -y install --no-install-recommends \
   sysstat
 
 export PATH=/opt/puppetlabs/puppet/bin:$PATH
-for g in json aws-sdk-core aws-sdk-secretsmanager
-do
-  with_retry gem install "$g"
-done
+# Pin every gem to a major version. json 3.x breaks the multi_json adapter
+# vendored in Puppet 8 (JSON.parse ArgumentError), so ih-puppet fails and
+# bootstrap ABANDONs the instance. RubyGems loads the newest installed json,
+# so a 3.x baked here wins over the boot-time ~> 2.6 pin.
+# WARNING: do not raise json to 3.x (incl. 3.0.2) until Puppet supports it.
+# See #29.
+with_retry gem install json --version '~> 2.6'
+with_retry gem install aws-sdk-core --version '~> 3.254'
+with_retry gem install aws-sdk-secretsmanager --version '~> 1.134'
 
 enable_ubuntu_pro
 
