@@ -227,10 +227,14 @@ with_retry apt-get -y install --no-install-recommends \
   sysstat
 
 export PATH=/opt/puppetlabs/puppet/bin:$PATH
-for g in json aws-sdk-core aws-sdk-secretsmanager
-do
-  with_retry gem install "$g"
-done
+# Pin every gem to its current major version. These install into Puppet's own
+# Ruby, and an unconstrained `require` activates the highest installed version,
+# so whatever lands here overrides anything the instance bootstrap installs
+# later. json 3.x dropped the two-argument JSON.parse that Puppet's vendored
+# multi_json 1.15 calls, and every `puppet module` run on the instance crashed.
+with_retry gem install json -v '~> 2.0'
+with_retry gem install aws-sdk-core -v '~> 3.0'
+with_retry gem install aws-sdk-secretsmanager -v '~> 1.0'
 
 enable_ubuntu_pro
 
